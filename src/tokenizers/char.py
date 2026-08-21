@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import ClassVar, Iterable, Sequence
 
-from .base import Tokenizer
+from .base import Tokenizer, pad_record, pad_vocab_size, undecodable_id
 
 
 @dataclass(frozen=True)
@@ -27,13 +27,20 @@ class CharTokenizer(Tokenizer):
 
     stoi: dict[str, int]
     itos: dict[int, str]
+    #: Report this `vocab_size` instead, if it's larger — see `base.pad_vocab_size`.
+    #: A field rather than an inherited attribute because the frozen dataclass has
+    #: to know about it: it belongs in `__eq__`, since two tokenizers over the same
+    #: alphabet with different padding size different embedding tables.
+    pad_vocab_to: int | None = None
 
     kind: ClassVar[str] = "char"
 
     # ---- construction -----------------------------------------------------
 
     @classmethod
-    def _from_chars(cls, chars: Iterable[str]) -> "CharTokenizer":
+    def _from_chars(
+        cls, chars: Iterable[str], pad_vocab_to: int | None = None
+    ) -> "CharTokenizer":
         """The one place ids get assigned. Sorted, so that the same set of
         characters always numbers the same way regardless of the order they
         arrived in — otherwise two runs over the same alphabet could disagree
@@ -46,28 +53,42 @@ class CharTokenizer(Tokenizer):
         return cls(
             stoi={ch: i for i, ch in enumerate(chars)},
             itos={i: ch for i, ch in enumerate(chars)},
+            pad_vocab_to=pad_vocab_to,
         )
 
     @classmethod
-    def from_text(cls, text: str) -> "CharTokenizer":
+    def from_text(cls, text: str, pad_vocab_to: int | None = None) -> "CharTokenizer":
         """Alphabet derived from the corpus."""
-        return cls._from_chars(text)
+        return cls._from_chars(text, pad_vocab_to)
 
     @classmethod
-    def from_alphabet(cls, alphabet: str) -> "CharTokenizer":
+    def from_alphabet(
+        cls, alphabet: str, pad_vocab_to: int | None = None
+    ) -> "CharTokenizer":
         """Alphabet stated up front. Duplicates are ignored, order is irrelevant."""
-        return cls._from_chars(alphabet)
+        return cls._from_chars(alphabet, pad_vocab_to)
 
     # ---- the contract -----------------------------------------------------
 
     @property
-    def vocab_size(self) -> int:
+    def unpadded_vocab_size(self) -> int:
+        """The characters, and nothing else. What `alphabet` iterates."""
         return len(self.itos)
 
     @property
+    def vocab_size(self) -> int:
+        return pad_vocab_size(self.unpadded_vocab_size, self.pad_vocab_to)
+
+    @property
     def alphabet(self) -> str:
-        """The vocabulary in id order — what `to_dict` writes down."""
-        return "".join(self.itos[i] for i in range(self.vocab_size))
+        """The vocabulary in id order — what `to_dict` writes down.
+
+        Over `unpadded_vocab_size`, not `vocab_size`: the padded ids stand for no
+        character, so walking to `vocab_size` here would raise on a padded
+        tokenizer — and a padded alphabet round-tripping through `to_dict` would
+        be a different tokenizer anyway.
+        """
+        return "".join(self.itos[i] for i in range(self.unpadded_vocab_size))
 
     def encode(self, text: str) -> list[int]:
         try:
@@ -85,15 +106,18 @@ class CharTokenizer(Tokenizer):
         try:
             return "".join(self.itos[i] for i in ids)
         except KeyError as exc:
-            raise ValueError(
-                f"id {exc.args[0]!r} is outside this tokenizer's vocabulary "
-                f"(size {self.vocab_size})"
+            raise undecodable_id(
+                exc.args[0], self.unpadded_vocab_size, self.pad_vocab_to
             ) from None
 
     # ---- persistence ------------------------------------------------------
 
     def to_dict(self) -> dict:
-        return {"kind": self.kind, "alphabet": self.alphabet}
+        return {
+            "kind": self.kind,
+            "alphabet": self.alphabet,
+            **pad_record(self.pad_vocab_to),
+        }
 
     @classmethod
     def from_dict(cls, data: dict) -> "CharTokenizer":
@@ -105,4 +129,5 @@ class CharTokenizer(Tokenizer):
         return cls(
             stoi={ch: i for i, ch in enumerate(chars)},
             itos={i: ch for i, ch in enumerate(chars)},
+            pad_vocab_to=data.get("pad_vocab_to"),
         )

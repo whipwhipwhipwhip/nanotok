@@ -14,13 +14,18 @@ where the ids come from — `RegexTokenizer` numbers them above the bytes,
 `TiktokenBPETokenizer` takes the numbers the encoding already assigned — so
 subclasses fill in `special_map` and inherit the rest. `ByteTokenizer` itself
 declares none, which makes its `encode` the same one-chunk pass it always was.
+
+**Vocabulary padding lives here too**, and for the third time for the same
+reason: rounding `vocab_size` up to a GPU-friendly number is arithmetic on one
+integer, identical whether the ids below it were merged here or came from
+tiktoken. `base.pad_vocab_size` says why a tokenizer owns that number at all.
 """
 
 from __future__ import annotations
 
 from typing import ClassVar, Sequence
 
-from .base import Tokenizer
+from .base import Tokenizer, pad_record, pad_vocab_size, undecodable_id
 from .merges import split_on_specials, text_to_bytes
 
 
@@ -29,14 +34,17 @@ class ByteTokenizer(Tokenizer):
 
     kind: ClassVar[str] = "byte"
 
-    def __init__(self) -> None:
+    def __init__(self, pad_vocab_to: int | None = None) -> None:
         self.vocab: dict[int, bytes] = {i: bytes([i]) for i in range(256)}
         #: text -> id, for ids that are declared rather than merged into
         #: existence. Empty here; subclasses that accept specials fill it.
         self.special_map: dict[str, int] = {}
+        #: Report this `vocab_size` instead, if it's larger. Config, not state:
+        #: it survives `train`, which resets everything else here.
+        self.pad_vocab_to = pad_vocab_to
 
     @property
-    def vocab_size(self) -> int:
+    def unpadded_vocab_size(self) -> int:
         # Derived from the table rather than stored, so it's right before, during
         # and after training. The old RegexTokenizer set `self.vocab_size` inside
         # `train`, which left an untrained instance with no attribute at all.
@@ -46,6 +54,14 @@ class ByteTokenizer(Tokenizer):
         # specials start at 100257 and leave 100256 unused, so counting entries
         # would hand the model a table one row short of the ids it must embed.
         return max(self.vocab) + 1
+
+    @property
+    def vocab_size(self) -> int:
+        # The number that sizes the embedding table, padding included. Kept
+        # separate from `unpadded_vocab_size` above, which is what the merge
+        # machinery counts with: `train` numbers new merges from the ids that
+        # actually exist, and padding must not move them.
+        return pad_vocab_size(self.unpadded_vocab_size, self.pad_vocab_to)
 
     def encode(self, text: str) -> list[int]:
         """Specials to their reserved id, everything else through the merges.
@@ -75,9 +91,8 @@ class ByteTokenizer(Tokenizer):
         try:
             raw = b"".join(self.vocab[i] for i in ids)
         except KeyError as exc:
-            raise ValueError(
-                f"id {exc.args[0]!r} is outside this tokenizer's vocabulary "
-                f"(size {self.vocab_size})"
+            raise undecodable_id(
+                exc.args[0], self.unpadded_vocab_size, self.pad_vocab_to
             ) from None
 
         # errors="replace", not "strict": a sampled id sequence can end mid
@@ -86,12 +101,14 @@ class ByteTokenizer(Tokenizer):
         return raw.decode("utf-8", errors="replace")
 
     def to_dict(self) -> dict:
-        # Nothing to record — the 256 bytes are the same everywhere.
-        return {"kind": self.kind}
+        # Nothing to record but the padding — the 256 bytes are the same
+        # everywhere, and the padding is the only thing that can make two byte
+        # tokenizers differently shaped.
+        return {"kind": self.kind, **pad_record(self.pad_vocab_to)}
 
     @classmethod
     def from_dict(cls, data: dict) -> "ByteTokenizer":
-        return cls()
+        return cls(pad_vocab_to=data.get("pad_vocab_to"))
 
     def __eq__(self, other: object) -> bool:
         # Not a dataclass (subclasses carry mutable merge state), so equality is
@@ -99,4 +116,9 @@ class ByteTokenizer(Tokenizer):
         return type(other) is type(self) and other.to_dict() == self.to_dict()
 
     def __repr__(self) -> str:
-        return f"{type(self).__name__}(vocab_size={self.vocab_size})"
+        # Padding shown as where it came from, not just where it landed: a bare
+        # 50304 reads as a vocabulary, and it isn't one.
+        padded = (
+            "" if self.pad_vocab_to is None else f" padded from {self.unpadded_vocab_size}"
+        )
+        return f"{type(self).__name__}(vocab_size={self.vocab_size}{padded})"

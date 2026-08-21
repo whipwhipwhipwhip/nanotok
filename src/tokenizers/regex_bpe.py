@@ -20,6 +20,7 @@ from typing import ClassVar
 
 import regex
 
+from .base import pad_record
 from .byte import ByteTokenizer
 from .merges import (
     apply_merges,
@@ -44,11 +45,12 @@ class RegexTokenizer(ByteTokenizer):
         *,
         special_tokens: list[str] | None = None,
         split_pattern: str = NO_SPLIT_PATTERN,
+        pad_vocab_to: int | None = None,
     ) -> None:
         # Keyword-only: `RegexTokenizer(pattern)` used to mean the split pattern,
         # and a positional call that now means "special tokens" would be a
         # silently different tokenizer rather than an error.
-        super().__init__()
+        super().__init__(pad_vocab_to=pad_vocab_to)
         self.splitter = split_pattern
         self.merge_map: dict[tuple[int, int], int] = {}
         self.special_tokens = validate_specials(special_tokens or [])
@@ -66,6 +68,12 @@ class RegexTokenizer(ByteTokenizer):
 
         # The ceiling counts the specials: they occupy ids before the first
         # merge is learned, so a vocab_size of 256 + len(specials) buys nothing.
+        #
+        # It does not count the padding, and `len(self.vocab)` rather than
+        # `self.vocab_size` is what keeps it from doing so. This argument asks
+        # for merges to be learned; padding adds ids that no merge can reach, so
+        # a padded tokenizer trained to 300 has 300 real ids and reports whatever
+        # it was padded to.
         if vocab_size <= len(self.vocab):
             raise ValueError(
                 f"vocab_size must exceed the {len(self.vocab)} ids already "
@@ -121,11 +129,16 @@ class RegexTokenizer(ByteTokenizer):
             # above these, so a recipe that dropped them would rebuild a
             # vocabulary with holes at 256.. and a short `vocab_size`.
             "special_tokens": list(self.special_tokens),
+            **pad_record(self.pad_vocab_to),
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "RegexTokenizer":
-        tok = cls(special_tokens=data["special_tokens"], split_pattern=data["splitter"])
+        tok = cls(
+            special_tokens=data["special_tokens"],
+            split_pattern=data["splitter"],
+            pad_vocab_to=data.get("pad_vocab_to"),
+        )
         tok.merge_map = {(p0, p1): idx for p0, p1, idx in data["merges"]}
         tok.vocab = build_vocab(tok.vocab, tok.merge_map)
         return tok

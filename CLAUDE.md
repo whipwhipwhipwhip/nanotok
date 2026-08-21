@@ -68,6 +68,11 @@ identity for provenance/caching purposes.
   they disagree for a reason (see `tiktoken_bpe.py` module docstring).
 - `vocab_size` is always "one past the highest id", not a count of entries — cl100k's
   specials leave a gap at 100256 that still has to be paid for in an embedding table.
+- `pad_vocab_to` (all four tokenizers, `base.pad_vocab_size`) rounds `vocab_size` up to a
+  GPU-friendly number — e.g. `TiktokenBPETokenizer("gpt2", pad_vocab_to=50304)`. It must
+  change `vocab_size` and nothing else: no id moves, `train`'s ceiling counts merges rather
+  than padding, and the key is omitted from `to_dict` when unpadded so old fingerprints
+  still match. It's absolute, not a multiple to round to — the caller does that arithmetic.
 
 ## Tests
 

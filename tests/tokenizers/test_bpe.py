@@ -16,6 +16,7 @@ from tokenizers import (
     ByteTokenizer,
     RegexTokenizer,
     TiktokenBPETokenizer,
+    fingerprint,
     from_dict,
 )
 
@@ -531,6 +532,171 @@ def test_specials_change_the_tiktoken_recipe(
     """Same reason as for RegexTokenizer: the recipe's sha256 keys the token
     cache, and these two encode the same text differently."""
     assert tiktoken_tokenizer.to_dict() != special_tiktoken_tokenizer.to_dict()
+
+
+###-----------------------------------------------------
+# Vocabulary padding
+
+
+def round_up(n: int, multiple: int) -> int:
+    """What a caller does to arrive at a `pad_vocab_to`. Deliberately here rather
+    than in the library: the tokenizer takes the number you want the embedding
+    table to be, and how you chose it is your business."""
+    return -(-n // multiple) * multiple
+
+
+@pytest.fixture(scope="module")
+def padded_tiktoken_tokenizer(encoding_name):
+    """The same encoding, rounded up to a multiple of 64 — 50304 for gpt2,
+    100288 for cl100k."""
+    unpadded = TiktokenBPETokenizer(encoding_name).vocab_size
+    return TiktokenBPETokenizer(
+        encoding_name, pad_vocab_to=round_up(unpadded, 64)
+    )
+
+
+@pytest.mark.parametrize("text", SAMPLES)
+def test_padding_does_not_touch_the_ids(padded_tiktoken_tokenizer, encoding_name, text):
+    """The load-bearing test again, with padding on. Padding adds rows to an
+    embedding table; if it can also move an id, it isn't padding, it's a
+    different tokenizer wearing the same name."""
+    assert padded_tiktoken_tokenizer.encode(text) == tiktoken.get_encoding(
+        encoding_name
+    ).encode(text)
+
+
+@pytest.mark.parametrize("text", SAMPLES)
+def test_padding_does_not_touch_the_round_trip(padded_tiktoken_tokenizer, text):
+    assert (
+        padded_tiktoken_tokenizer.decode(padded_tiktoken_tokenizer.encode(text)) == text
+    )
+
+
+def test_gpt2_pads_to_50304():
+    """The number this feature exists for. 50257 is 50257; 50304 is 64 x 786, and
+    the difference is measurable on the matmuls either side of the model. Pinned
+    both with and without the special, because the unpadded size differs and the
+    padded one deliberately doesn't."""
+    assert TiktokenBPETokenizer("gpt2", pad_vocab_to=50304).vocab_size == 50304
+    assert (
+        TiktokenBPETokenizer(
+            "gpt2", special_tokens=[EOT], pad_vocab_to=50304
+        ).vocab_size
+        == 50304
+    )
+
+
+def test_padding_leaves_the_unpadded_size_readable(padded_tiktoken_tokenizer):
+    """`train` counts with one and the embedding table is sized by the other, so
+    a padded tokenizer has to be able to say both."""
+    assert padded_tiktoken_tokenizer.unpadded_vocab_size < (
+        padded_tiktoken_tokenizer.vocab_size
+    )
+    assert padded_tiktoken_tokenizer.unpadded_vocab_size == len(
+        padded_tiktoken_tokenizer.vocab
+    )
+
+
+def test_padding_to_the_size_it_already_is_changes_nothing():
+    assert TiktokenBPETokenizer("gpt2", pad_vocab_to=50256).vocab_size == 50256
+    assert ByteTokenizer(pad_vocab_to=256).vocab_size == 256
+
+
+def test_padding_below_the_vocabulary_is_rejected():
+    """Not `max(unpadded, target)`: the caller stated the size of an embedding
+    table, and quietly returning a different number is how a checkpoint ends up
+    the wrong shape with nothing to point at."""
+    with pytest.raises(ValueError, match="below the 50256 ids"):
+        TiktokenBPETokenizer("gpt2", pad_vocab_to=50000).vocab_size
+
+
+@pytest.mark.parametrize("bad", [0, -64, 1.5, "50304"])
+def test_padding_must_be_a_positive_integer(bad):
+    with pytest.raises(ValueError, match="positive integer"):
+        ByteTokenizer(pad_vocab_to=bad).vocab_size
+
+
+def test_a_padding_id_decodes_to_nothing(padded_tiktoken_tokenizer):
+    """Inside `vocab_size` and outside `vocab` — the same shape of object as the
+    hole cl100k leaves at 100256. The message says "padding" rather than
+    "outside" because the id *is* inside the vocabulary, and the actual bug is a
+    sampler drawing from logits nobody masked."""
+    pad_id = padded_tiktoken_tokenizer.unpadded_vocab_size
+
+    assert pad_id < padded_tiktoken_tokenizer.vocab_size
+
+    with pytest.raises(ValueError, match="padding"):
+        padded_tiktoken_tokenizer.decode([pad_id])
+
+
+def test_an_id_above_the_padding_is_still_out_of_range(padded_tiktoken_tokenizer):
+    with pytest.raises(ValueError, match="outside"):
+        padded_tiktoken_tokenizer.decode([padded_tiktoken_tokenizer.vocab_size])
+
+
+def test_padding_changes_the_recipe(tiktoken_tokenizer, padded_tiktoken_tokenizer):
+    """Same reason specials do: the fingerprint keys the token cache and goes
+    into a run's provenance, and these two size different embedding tables."""
+    assert tiktoken_tokenizer.to_dict() != padded_tiktoken_tokenizer.to_dict()
+    assert fingerprint(tiktoken_tokenizer) != fingerprint(padded_tiktoken_tokenizer)
+
+
+def test_an_unpadded_recipe_records_no_padding(tiktoken_tokenizer):
+    """The key is omitted rather than written as null, so every fingerprint taken
+    before padding existed still identifies the same tokenizer."""
+    assert "pad_vocab_to" not in tiktoken_tokenizer.to_dict()
+    assert "pad_vocab_to" not in RegexTokenizer().to_dict()
+    assert ByteTokenizer().to_dict() == {"kind": "byte"}
+
+
+@pytest.mark.parametrize(
+    "tokenizer",
+    [
+        ByteTokenizer(pad_vocab_to=320),
+        RegexTokenizer(special_tokens=SPECIALS, pad_vocab_to=512),
+        TiktokenBPETokenizer("gpt2", special_tokens=[EOT], pad_vocab_to=50304),
+    ],
+    ids=["byte", "regex", "tiktoken"],
+)
+def test_padding_survives_a_round_trip_through_to_dict(tokenizer):
+    rebuilt = from_dict(tokenizer.to_dict())
+
+    assert rebuilt == tokenizer
+    assert rebuilt.vocab_size == tokenizer.vocab_size
+    assert rebuilt.pad_vocab_to == tokenizer.pad_vocab_to
+
+
+def test_the_training_target_ignores_the_padding():
+    """`train`'s ceiling asks for merges to be learned. Padding adds ids no merge
+    can reach, so counting it would silently buy fewer merges than were asked
+    for — 44 instead of 300 here."""
+    tok = RegexTokenizer(split_pattern=r"\S+|\s+", pad_vocab_to=512)
+    tok.train(TRAINING_TEXT, vocab_size=300)
+
+    assert len(tok.vocab) == 300
+    assert tok.unpadded_vocab_size == 300
+    assert tok.vocab_size == 512
+
+
+def test_padding_survives_training():
+    """Padding is config, not learned state, so the reset at the top of `train`
+    must not take it with the merges."""
+    tok = RegexTokenizer(pad_vocab_to=512)
+    tok.train(TRAINING_TEXT, vocab_size=300)
+    tok.train(TRAINING_TEXT, vocab_size=280)
+
+    assert tok.vocab_size == 512
+
+
+def test_training_past_the_padding_is_rejected():
+    """Caught when the size is asked for rather than silently ignored: a padded
+    tokenizer trained past its target has an embedding table sized by neither
+    number, and the checkpoint is the thing that finds out."""
+    tok = RegexTokenizer(pad_vocab_to=280)
+    tok.train(TRAINING_TEXT, vocab_size=300)
+
+    with pytest.raises(ValueError, match="below the 300 ids"):
+        tok.vocab_size
 
 
 ###-----------------------------------------------------

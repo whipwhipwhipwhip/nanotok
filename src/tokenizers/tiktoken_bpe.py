@@ -32,6 +32,13 @@ rather than numbering them above the ranks, because those ids are what makes our
 output interchangeable with `tiktoken.encode`. Under cl100k that leaves 100256
 unused: a hole in the id space, which `vocab_size` counts, since an embedding
 table is sized by the highest id and not by how many are reachable.
+
+**Padding is the same hole, dug on purpose.** `pad_vocab_to=50304` takes GPT-2's
+50256 (or 50257, with `<|endoftext|>` declared) up to a number with friendlier
+factors, which is worth real throughput on the matmuls either side of the model
+and costs a handful of rows nothing ever reads. It changes `vocab_size` and
+nothing else — the ids this class emits stay the ids `tiktoken.encode` emits,
+which is the property the whole module exists to keep. See `base.pad_vocab_size`.
 """
 
 from __future__ import annotations
@@ -42,6 +49,7 @@ from typing import ClassVar, Sequence
 import regex
 import tiktoken
 
+from .base import pad_record, undecodable_id
 from .byte import ByteTokenizer
 from .merges import (
     apply_merges,
@@ -61,8 +69,9 @@ class TiktokenBPETokenizer(ByteTokenizer):
         encoding_name: str,
         split_pattern: str | None = None,
         special_tokens: list[str] | None = None,
+        pad_vocab_to: int | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(pad_vocab_to=pad_vocab_to)
 
         merge_map, byte_shuffle, pat_str, available_specials = _load_encoding(encoding_name)
 
@@ -129,9 +138,8 @@ class TiktokenBPETokenizer(ByteTokenizer):
         try:
             shuffled = b"".join(self.vocab[i] for i in ids)
         except KeyError as exc:
-            raise ValueError(
-                f"id {exc.args[0]!r} is outside this tokenizer's vocabulary "
-                f"(size {self.vocab_size})"
+            raise undecodable_id(
+                exc.args[0], self.unpadded_vocab_size, self.pad_vocab_to
             ) from None
 
         # Un-permute after concatenating, not before: the permutation is
@@ -151,11 +159,17 @@ class TiktokenBPETokenizer(ByteTokenizer):
             # Which specials this run declared, not which the encoding defines:
             # the difference is `vocab_size`, so it's part of the recipe.
             "special_tokens": list(self.special_tokens),
+            **pad_record(self.pad_vocab_to),
         }
 
     @classmethod
     def from_dict(cls, data: dict) -> "TiktokenBPETokenizer":
-        return cls(data["encoding"], data["splitter"], data["special_tokens"])
+        return cls(
+            data["encoding"],
+            data["splitter"],
+            data["special_tokens"],
+            data.get("pad_vocab_to"),
+        )
 
 
 @lru_cache(maxsize=None)
