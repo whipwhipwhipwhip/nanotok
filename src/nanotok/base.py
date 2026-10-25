@@ -33,7 +33,7 @@ from typing import ClassVar, Sequence
 class Tokenizer(ABC):
     """What every tokenizer promises."""
 
-    #: The tag `to_dict` writes and `tokenizers.from_dict` dispatches on. Set by
+    #: The tag `to_dict` writes and `nanotok.from_dict` dispatches on. Set by
     #: each concrete subclass; the package-level `from_dict` builds its table
     #: from these, so two tokenizers may not share one.
     kind: ClassVar[str]

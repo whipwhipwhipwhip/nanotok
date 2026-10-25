@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 import tiktoken
 
-from tokenizers import (
+from nanotok import (
     ByteTokenizer,
     RegexTokenizer,
     TiktokenBPETokenizer,

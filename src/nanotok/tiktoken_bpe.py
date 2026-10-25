@@ -8,7 +8,7 @@ is a learning repo. `tiktoken.get_encoding(name).encode` is a drop-in replacemen
 behind the `Tokenizer` ABC — a second entry in the tokenizer table, no other
 change anywhere — and is roughly a hundred times faster, since it does the merge
 loop in Rust. Swap to it if encode cost ever dominates a real training run; the
-tiktoken-equivalence tests in `tests/tokenizers/test_bpe.py` are what make that a
+tiktoken-equivalence tests in `tests/nanotok/test_bpe.py` are what make that a
 swap rather than a rewrite, so they have to keep passing.
 
 **Why the merges have to be recovered.** `mergeable_ranks` maps a finished byte

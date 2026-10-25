@@ -149,7 +149,7 @@ def apply_merges(tokens: list[int], merge_map: dict[tuple[int, int], int]) -> li
     were learned in, so replaying them in that order is what reproduces the
     training-time vocabulary. Getting this wrong doesn't crash, it just produces
     plausible-looking ids that disagree with the reference implementation, which
-    is why `tests/tokenizers` checks against tiktoken rather than eyeballing.
+    is why `tests/nanotok` checks against tiktoken rather than eyeballing.
     """
     while True:
         best_rank = float("inf")

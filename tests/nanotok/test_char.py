@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from tokenizers import CharTokenizer, fingerprint, from_dict
+from nanotok import CharTokenizer, fingerprint, from_dict
 
 
 def test_round_trip():
@@ -77,7 +77,7 @@ def test_to_dict_is_json_shaped():
 def test_padding_rounds_the_vocabulary_up_without_adding_characters():
     """The adder's thirteen characters in an embedding table of 16 rows. The
     three extra ids stand for nothing and are never emitted — see
-    `tokenizers.base.pad_vocab_size`."""
+    `nanotok.base.pad_vocab_size`."""
     tok = CharTokenizer.from_alphabet("0123456789+=\n", pad_vocab_to=16)
 
     assert tok.vocab_size == 16

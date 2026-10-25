@@ -8,14 +8,14 @@ A from-scratch reimplementation of BPE tokenization (nanoGPT-lecture style), bui
 understand the algorithm rather than to replace `tiktoken`. `TiktokenBPETokenizer` runs our
 own merge loop but is seeded from a real tiktoken encoding's learned ranks, so its output can
 be checked against `tiktoken.encode` directly — that equivalence is the project's main
-correctness signal (`tests/tokenizers/test_bpe.py::test_matches_tiktoken`).
+correctness signal (`tests/nanotok/test_bpe.py::test_matches_tiktoken`).
 
 ## Commands
 
 ```bash
 uv sync                    # install deps (uses uv_build backend, Python >=3.12)
 uv run pytest -q           # run the full test suite
-uv run pytest tests/tokenizers/test_char.py::test_round_trip   # single test
+uv run pytest tests/nanotok/test_char.py::test_round_trip   # single test
 uv run pytest -k specials  # by keyword
 ```
 
@@ -23,7 +23,7 @@ There is no lint/format/typecheck config in this repo — don't invent commands 
 
 ## Architecture
 
-Four tokenizers share one `Tokenizer` ABC (`src/tokenizers/base.py`: `vocab_size`, `encode`,
+Four tokenizers share one `Tokenizer` ABC (`src/nanotok/base.py`: `vocab_size`, `encode`,
 `decode`, `to_dict`/`from_dict`), but split into two unrelated inheritance branches because
 their id spaces aren't refinements of each other:
 
@@ -51,7 +51,7 @@ their id spaces aren't refinements of each other:
 `find_largest`, `apply_merges`, `build_vocab`, special-token splitting/validation) — kept in
 one place specifically so the trained and tiktoken-seeded tokenizers agree on what a merge is.
 
-`src/tokenizers/__init__.py` maps each concrete class's `kind` tag to itself (`_KINDS`) so
+`src/nanotok/__init__.py` maps each concrete class's `kind` tag to itself (`_KINDS`) so
 `from_dict` can reconstruct any tokenizer from its `to_dict()` output without the caller
 naming a class, and exposes `fingerprint()` (sha256 of the JSON recipe) as a tokenizer's
 identity for provenance/caching purposes.
@@ -76,7 +76,7 @@ identity for provenance/caching purposes.
 
 ## Tests
 
-`tests/tokenizers/test_bpe.py` parametrizes over both `gpt2` and `cl100k_base` encodings and
+`tests/nanotok/test_bpe.py` parametrizes over both `gpt2` and `cl100k_base` encodings and
 over a fixed list of tricky `SAMPLES` (contractions, digit runs, multi-byte characters,
 leading/trailing/repeated whitespace) chosen because they're where a naive BPE implementation
 diverges from GPT-2/GPT-4's real tokenizers. When changing merge/encode logic, keep
