@@ -182,17 +182,23 @@ name = "nanotok"
 version = "0.0.2"
 source = { editable = "." }
 dependencies = [
-    { name = "pytest" },
     { name = "regex" },
     { name = "tiktoken" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
 [package.metadata]
 requires-dist = [
-    { name = "pytest" },
     { name = "regex" },
     { name = "tiktoken" },
 ]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest" }]
 
 [[package]]
 name = "packaging"
