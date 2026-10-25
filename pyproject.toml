@@ -1,6 +1,6 @@
 [project]
 name = "nanotok"
-version = "0.0.2"
+version = "0.0.4"
 requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE"]
