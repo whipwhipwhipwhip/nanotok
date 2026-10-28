@@ -1,44 +1,38 @@
-"""BPE that runs our merge loop, seeded from a tiktoken encoding's learned ranks.
+"""Our BPE merge loop, using the learned ranks from a tiktoken encoding.
 
-One class for every tiktoken encoding — `gpt2` and `cl100k_base` differ only in
-the ranks and the split pattern, both of which come out of the encoding itself.
+One class covers every tiktoken encoding. `gpt2` and `cl100k_base` only differ
+in their ranks and split pattern, and both come from the encoding itself.
 
-**Why this rather than calling tiktoken?** Because building it is the point; this
-is a learning repo. `tiktoken.get_encoding(name).encode` is a drop-in replacement
-behind the `Tokenizer` ABC — a second entry in the tokenizer table, no other
-change anywhere — and is roughly a hundred times faster, since it does the merge
-loop in Rust. Swap to it if encode cost ever dominates a real training run; the
-tiktoken-equivalence tests in `tests/nanotok/test_bpe.py` are what make that a
-swap rather than a rewrite, so they have to keep passing.
+**Why not just call tiktoken?** Because this is a learning repo, and the point
+is to write it myself. `tiktoken.get_encoding(name).encode` could be wrapped in
+the same `Tokenizer` interface with no other changes, and would be roughly a
+hundred times faster since its merge loop is in Rust. If encoding speed ever
+matters for a training run, swap to that. The tiktoken comparison tests in
+`tests/nanotok/test_bpe.py` are what guarantee the two give the same ids.
 
-**Why the merges have to be recovered.** `mergeable_ranks` maps a finished byte
-string to its rank (`b"ing" -> 278`), which has already thrown away *which two
-pieces* were joined to make it — and the pair is exactly what a merge loop needs.
-`recover_merges` re-derives it by re-running BPE on each token restricted to
-lower ranks. Calling tiktoken directly needs none of this; running your own loop
-needs all of it.
+**Why the merges have to be recovered.** `mergeable_ranks` maps each finished
+byte string to its rank (`b"ing" -> 278`), but doesn't say which two pieces were
+joined to make it, and the pair is what a merge loop needs. `recover_merges`
+works it out by re-running BPE on each token using only the lower ranks.
 
-**Why the byte shuffle.** Neither GPT-2 nor GPT-4 numbers the 256 single-byte
-tokens in byte order — under `gpt2`, byte `0x00` is rank 188. So raw bytes are
-permuted into rank space before merging, and permuted back after decoding.
+**Why the bytes are shuffled.** Neither GPT-2 nor GPT-4 gives the 256 single
+bytes ranks in byte order (under `gpt2`, byte `0x00` is rank 188). So raw bytes
+are mapped into rank space before merging, and mapped back after decoding.
 
 **Special tokens are opt-in, and keep the encoding's own ids.** `<|endoftext|>`
-and friends live outside `mergeable_ranks`, in a table of their own, so a
-tokenizer that declares none reports 50256 for GPT-2 rather than tiktoken's
-50257 — which is the right answer for a run that never emits one, and the wrong
-size of embedding table for a run that does. Declaring them by name takes the
-ids OpenAI assigned (`<|endoftext|>` is 50256 under gpt2, 100257 under cl100k)
-rather than numbering them above the ranks, because those ids are what makes our
-output interchangeable with `tiktoken.encode`. Under cl100k that leaves 100256
-unused: a hole in the id space, which `vocab_size` counts, since an embedding
-table is sized by the highest id and not by how many are reachable.
+and the other specials aren't in `mergeable_ranks`; tiktoken keeps them in a
+separate table. So a tokenizer with no specials declared has a vocab size of
+50256 for GPT-2, not tiktoken's 50257. That's correct if the run never uses
+`<|endoftext|>`, and one too small if it does. Declaring a special by name uses
+the id OpenAI assigned (`<|endoftext|>` is 50256 under gpt2, 100257 under
+cl100k) rather than numbering it after the ranks, so the output still matches
+`tiktoken.encode`. Under cl100k this leaves 100256 unused, and `vocab_size`
+still counts it, since an embedding table is sized by the highest id.
 
-**Padding is the same hole, dug on purpose.** `pad_vocab_to=50304` takes GPT-2's
-50256 (or 50257, with `<|endoftext|>` declared) up to a number with friendlier
-factors, which is worth real throughput on the matmuls either side of the model
-and costs a handful of rows nothing ever reads. It changes `vocab_size` and
-nothing else — the ids this class emits stay the ids `tiktoken.encode` emits,
-which is the property the whole module exists to keep. See `base.pad_vocab_size`.
+**Padding.** `pad_vocab_to=50304` rounds GPT-2's 50256 (or 50257 with
+`<|endoftext|>`) up to a size that's faster on a GPU. It changes `vocab_size`
+and nothing else, so the ids still match `tiktoken.encode`. See
+`base.pad_vocab_size`.
 """
 
 from __future__ import annotations
@@ -76,14 +70,13 @@ class TiktokenBPETokenizer(ByteTokenizer):
         merge_map, byte_shuffle, pat_str, available_specials = _load_encoding(encoding_name)
 
         self.encoding_name = encoding_name
-        # The encoding's own pattern by default, so the split can't drift out of
-        # step with the ranks — GPT-2's pattern is case-sensitive and GPT-4's
-        # isn't, and using one with the other's merges produces ids that look
-        # fine and are wrong.
+        # Use the encoding's own pattern by default, so the split matches the
+        # ranks. GPT-2's pattern is case-sensitive and GPT-4's isn't, and using
+        # one with the other's merges gives ids that look fine but are wrong.
         self.splitter = pat_str if split_pattern is None else split_pattern
 
-        # Copies: `_load_encoding` is cached, and one instance mutating these
-        # would silently reshape every other instance of the same encoding.
+        # Copies, because `_load_encoding` is cached and every instance of the
+        # same encoding shares its return values.
         self.merge_map = dict(merge_map)
         self.byte_shuffle = dict(byte_shuffle)
         self.inverse_byte_shuffle = {v: k for k, v in self.byte_shuffle.items()}
@@ -99,15 +92,14 @@ class TiktokenBPETokenizer(ByteTokenizer):
         )
 
     def _register_specials(self, available: dict[str, int]) -> None:
-        """Take the encoding's own ids for the specials this run declared.
+        """Look up the encoding's ids for the declared special tokens.
 
-        Not numbered above the ranks the way `RegexTokenizer` numbers its own:
-        these ids already exist, and inventing different ones would break the
-        equivalence with `tiktoken.encode` that the whole class is here to keep.
+        Unlike `RegexTokenizer`, these aren't numbered after the merges: the
+        ids already exist, and using different ones would stop the output
+        matching `tiktoken.encode`.
 
-        An unknown name is an error rather than a new token, for the same
-        reason — a tokenizer cannot mint an id in a vocabulary it didn't train.
-        Use `RegexTokenizer` if you want to declare your own.
+        For the same reason, a name the encoding doesn't define is an error
+        rather than a new token. Use `RegexTokenizer` to define your own.
         """
         unknown = [s for s in self.special_tokens if s not in available]
         if unknown:
@@ -118,9 +110,9 @@ class TiktokenBPETokenizer(ByteTokenizer):
 
         self.special_map = {s: available[s] for s in self.special_tokens}
 
-        # Stored permuted, like every other entry in this table: `decode`
-        # un-permutes the whole concatenated byte string in one pass at the end,
-        # so a special written in raw bytes would come back out scrambled.
+        # Stored in rank space like everything else in `vocab`, because `decode`
+        # un-shuffles all the bytes at the end. Raw bytes would come out
+        # scrambled.
         for special, token in self.special_map.items():
             self.vocab[token] = bytes(self._to_rank_space(special))
 
@@ -142,22 +134,20 @@ class TiktokenBPETokenizer(ByteTokenizer):
                 exc.args[0], self.unpadded_vocab_size, self.pad_vocab_to
             ) from None
 
-        # Un-permute after concatenating, not before: the permutation is
-        # per-byte, so it commutes with joining, and doing it once at the end is
-        # one pass instead of one per token.
+        # Un-shuffle once after joining rather than per token. The shuffle is
+        # per byte, so the result is the same.
         raw = bytes(self.inverse_byte_shuffle[b] for b in shuffled)
         return raw.decode("utf-8", errors="replace")
 
     def to_dict(self) -> dict:
-        # The encoding name, not 50k merges: tiktoken is a dependency, the ranks
-        # are fixed, and a 2MB tokenizer.json in every run directory would be
-        # a copy of something that can't drift.
+        # Just the encoding name, not 50k merges. tiktoken is a dependency and
+        # its ranks don't change, so there's no need to save a copy.
         return {
             "kind": self.kind,
             "encoding": self.encoding_name,
             "splitter": self.splitter,
-            # Which specials this run declared, not which the encoding defines:
-            # the difference is `vocab_size`, so it's part of the recipe.
+            # The specials this tokenizer declared, not all the encoding
+            # defines. They change `vocab_size`, so they're part of the recipe.
             "special_tokens": list(self.special_tokens),
             **pad_record(self.pad_vocab_to),
         }
@@ -174,14 +164,14 @@ class TiktokenBPETokenizer(ByteTokenizer):
 
 @lru_cache(maxsize=None)
 def _load_encoding(encoding_name: str):
-    """Everything we take from tiktoken, recovered once per encoding.
+    """Everything we need from tiktoken, loaded once per encoding.
 
-    Cached because `recover_merges` re-runs BPE on all 50k+ tokens — seconds, not
-    milliseconds, and it produces the same answer every time.
+    Cached because `recover_merges` re-runs BPE on all 50k+ tokens, which takes
+    a few seconds and always gives the same answer.
 
-    `_mergeable_ranks` and `_pat_str` are private tiktoken attributes. That's the
-    price of reimplementing the algorithm: the public API only offers `encode`,
-    which is the thing we're deliberately not calling.
+    `_mergeable_ranks`, `_pat_str` and `_special_tokens` are private tiktoken
+    attributes. The public API only offers `encode`, which is the thing we're
+    reimplementing.
     """
     enc = tiktoken.get_encoding(encoding_name)
     ranks = enc._mergeable_ranks
@@ -189,9 +179,6 @@ def _load_encoding(encoding_name: str):
     merge_map = recover_merges(ranks)
     byte_shuffle = {i: ranks[bytes([i])] for i in range(256)}
 
-    # `_special_tokens` is the table `mergeable_ranks` deliberately isn't part
-    # of: names to ids that no merge can ever produce. Public in the sense that
-    # `enc.encode(..., allowed_special=...)` names them, private as an attribute.
     return merge_map, byte_shuffle, enc._pat_str, dict(enc._special_tokens)
 
 

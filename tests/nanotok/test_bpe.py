@@ -1,10 +1,9 @@
 """The byte-level tokenizers.
 
-The load-bearing test in here is `test_matches_tiktoken`. Everything else checks
-that our BPE is self-consistent; that one checks it's *right*, against the
-reference implementation of the same vocabulary. It's also what makes swapping
-`TiktokenBPETokenizer` for a thin `tiktoken` wrapper a config change rather than
-a rewrite — the two are interchangeable exactly as long as this passes.
+The most important test here is `test_matches_tiktoken`. Most of the others
+check that our BPE is self-consistent; that one checks it gives the same ids as
+tiktoken for the same vocabulary. As long as it passes, `TiktokenBPETokenizer`
+could be swapped for a plain `tiktoken` wrapper.
 """
 
 from __future__ import annotations
@@ -20,8 +19,7 @@ from nanotok import (
     from_dict,
 )
 
-# The cases that separate a working BPE from one that looks like it works:
-# contractions (GPT-2's pattern is case-sensitive, GPT-4's isn't), digit runs
+# Cases where it's easy to get BPE subtly wrong: contractions (GPT-2's pattern is case-sensitive, GPT-4's isn't), digit runs
 # (GPT-4 caps them at three), leading and trailing whitespace, repeated
 # whitespace, and multi-byte characters that a byte-level merge can split.
 SAMPLES = [
@@ -59,8 +57,8 @@ def encoding_name(request):
 
 @pytest.fixture(scope="module")
 def tiktoken_tokenizer(encoding_name):
-    # Module-scoped, though `_load_encoding` is cached anyway: recovering the
-    # merges re-runs BPE over every token in the vocabulary.
+    # Module-scoped (though `_load_encoding` is cached anyway), since
+    # recovering the merges re-runs BPE over every token in the vocabulary.
     return TiktokenBPETokenizer(encoding_name)
 
 
@@ -79,8 +77,7 @@ def test_byte_round_trip(text):
 
 
 def test_byte_encodes_multibyte_characters_as_several_ids():
-    # One character, four bytes: the thing that makes byte-level and
-    # character-level tokenizers different ID spaces rather than variants.
+    # One character, four bytes.
     assert len(ByteTokenizer().encode("🙂")) == 4
 
 
@@ -111,8 +108,8 @@ def test_training_grows_the_vocabulary_and_shortens_the_encoding():
 
 
 def test_training_stops_early_when_nothing_repeats():
-    """`vocab_size` is a ceiling, not a promise — a corpus with no pairs left to
-    merge stops short rather than inventing merges."""
+    """`vocab_size` is an upper limit. If no pair repeats, training stops
+    early."""
     tok = RegexTokenizer()
     tok.train(SPARSE_TEXT, vocab_size=400)
 
@@ -125,8 +122,8 @@ def test_vocab_size_must_exceed_the_byte_tokens():
 
 
 def test_merges_do_not_cross_the_split_boundary():
-    """The reason the splitter exists: with words and whitespace split apart, no
-    learned token can contain both."""
+    """With words and whitespace split apart, no learned token can contain
+    both."""
     tok = RegexTokenizer(split_pattern=r"\S+|\s+")
     tok.train("aa bb aa bb aa bb ", vocab_size=270)
 
@@ -164,8 +161,8 @@ SPECIALS = ["<|eot|>", "<|pad|>"]
 
 @pytest.fixture(scope="module")
 def special_tokenizer():
-    """Trained, with two specials. Module-scoped, so tests that mutate it (by
-    retraining) build their own rather than using this one."""
+    """Trained, with two specials. Module-scoped, so tests that retrain should
+    build their own instead."""
     tok = RegexTokenizer(special_tokens=SPECIALS, split_pattern=r"\S+|\s+")
     tok.train(TRAINING_TEXT, vocab_size=300)
     return tok
@@ -179,8 +176,8 @@ def test_specials_are_numbered_above_the_bytes_in_declaration_order():
 
 
 def test_declaration_order_decides_the_ids():
-    """Order is part of the recipe, not presentation — which is why `to_dict`
-    records a list and must never sort it or make it a set."""
+    """Order matters, which is why `to_dict` saves a list and must never sort
+    it or turn it into a set."""
     forward = RegexTokenizer(special_tokens=["<|eot|>", "<|pad|>"])
     reversed_ = RegexTokenizer(special_tokens=["<|pad|>", "<|eot|>"])
 
@@ -188,8 +185,8 @@ def test_declaration_order_decides_the_ids():
 
 
 def test_an_untrained_tokenizer_already_has_its_specials():
-    """Specials are declared, not learned. Registering them inside `train` made
-    their ids depend on the corpus and left an untrained instance without them."""
+    """Specials are declared, not learned, so they exist before `train` is
+    called."""
     tok = RegexTokenizer(special_tokens=["<|eot|>"])
 
     assert tok.encode("<|eot|>") == [256]
@@ -227,8 +224,8 @@ def test_declaring_specials_leaves_ordinary_text_round_tripping(
 
 
 def test_a_special_does_not_disturb_its_neighbours(special_tokenizer):
-    """The split happens *before* the regex, so the text either side of a special
-    is chunked and merged exactly as it would be on its own."""
+    """The split on specials happens before the regex, so the text either side
+    of a special encodes the same as it would on its own."""
     tok = special_tokenizer
     left, right = "the theory of", " the thing itself"
 
@@ -238,8 +235,8 @@ def test_a_special_does_not_disturb_its_neighbours(special_tokenizer):
 
 
 def test_ordinary_text_can_never_forge_a_special_id(special_tokenizer):
-    """The reason for splitting before the regex rather than after: a special is
-    unreachable from the merge machinery, so no corpus text produces its id."""
+    """Specials never go through the merges, so no ordinary text can produce
+    a special's id."""
     special_ids = set(special_tokenizer.special_map.values())
 
     assert special_ids
@@ -247,9 +244,8 @@ def test_ordinary_text_can_never_forge_a_special_id(special_tokenizer):
 
 
 def test_no_merge_is_built_out_of_a_special(special_tokenizer):
-    """Specials never enter `apply_merges`, so no merge pair names one — which is
-    also why a missing special leaves a silent hole in a rebuilt vocabulary rather
-    than a KeyError."""
+    """Specials never go through `apply_merges`, so no merge pair contains
+    one."""
     special_ids = set(special_tokenizer.special_map.values())
 
     assert not any(
@@ -258,17 +254,16 @@ def test_no_merge_is_built_out_of_a_special(special_tokenizer):
 
 
 def test_the_longest_matching_special_wins():
-    """Regex alternation is first-match, not longest-match, so the split pattern
-    orders by length — independently of the declaration order that fixes the ids.
-    Declared shortest-first, the short one would swallow the long one's prefix."""
+    """Regex alternation takes the first match, not the longest, so the split
+    pattern is ordered by length (the ids still follow declaration order).
+    Otherwise the short one would match the start of the long one."""
     tok = RegexTokenizer(special_tokens=["<|end|>", "<|end|>of<|end|>"])
 
     assert tok.encode("<|end|>of<|end|>") == [257]
 
 
 def test_without_specials_the_marker_is_just_text():
-    """The split step is a no-op with nothing to split on: a tokenizer that
-    declares no specials behaves exactly as it did before they existed."""
+    """With no specials declared, `<|eot|>` is just ordinary text."""
     tok = RegexTokenizer(split_pattern=r"\S+|\s+")
     tok.train(TRAINING_TEXT, vocab_size=300)
 
@@ -278,9 +273,9 @@ def test_without_specials_the_marker_is_just_text():
 
 
 def test_retraining_keeps_the_special_ids_stable():
-    """`train` resets the vocabulary before learning, and the reset has to restore
-    the specials, not just the 256 bytes — otherwise a second `train` renumbers
-    every special and invalidates the checkpoint trained against the first."""
+    """`train` resets the vocabulary first, and the reset has to put the
+    specials back with the same ids, or a checkpoint trained with the old ids
+    would break."""
     tok = RegexTokenizer(special_tokens=SPECIALS, split_pattern=r"\S+|\s+")
     tok.train(TRAINING_TEXT, vocab_size=300)
     before = dict(tok.special_map)
@@ -292,8 +287,8 @@ def test_retraining_keeps_the_special_ids_stable():
 
 
 def test_vocab_size_must_exceed_the_bytes_plus_the_specials():
-    """The ceiling counts specials: two of them leave 258 ids already spoken for,
-    so 258 buys no merges at all."""
+    """`vocab_size` counts the specials: with two of them, 258 ids are already
+    taken, so 258 would mean no merges."""
     tok = RegexTokenizer(special_tokens=SPECIALS)
 
     with pytest.raises(ValueError, match="258"):
@@ -301,33 +296,30 @@ def test_vocab_size_must_exceed_the_bytes_plus_the_specials():
 
 
 def test_a_duplicate_special_is_rejected():
-    """Deduping silently would shift every later special down an id, so the
-    tokenizer you get is not the one the config describes."""
+    """Silently removing the duplicate would shift every later special down an
+    id."""
     with pytest.raises(ValueError, match="distinct"):
         RegexTokenizer(special_tokens=["<|eot|>", "<|pad|>", "<|eot|>"])
 
 
 def test_an_empty_special_is_rejected():
-    """An empty string matches everywhere, so the split would never terminate on
-    anything useful — and dropping it quietly renumbers the rest."""
+    """An empty string matches everywhere, and silently dropping it would
+    renumber the rest."""
     with pytest.raises(ValueError, match="non-empty"):
         RegexTokenizer(special_tokens=["<|eot|>", ""])
 
 
 def test_specials_change_the_recipe():
-    """`to_dict`'s sha256 is the tokenizer's fingerprint in provenance and part of
-    the token cache key. Two tokenizers that encode differently must not serialise
-    identically, or the cache serves one's ids for the other."""
+    """`to_dict` is hashed for the tokenizer's fingerprint, so two tokenizers
+    that encode differently must not serialise the same."""
     assert RegexTokenizer().to_dict() != RegexTokenizer(
         special_tokens=SPECIALS
     ).to_dict()
 
 
 def test_specials_survive_a_round_trip_through_to_dict(special_tokenizer):
-    """The recipe has to reproduce the whole *id space*, not just the merges. The
-    merge ids in `to_dict` are absolute and were numbered above the specials, so
-    dropping the specials leaves 256..256+n-1 as holes: `vocab_size` comes back
-    short and the checkpoint's embedding table no longer lines up."""
+    """The merge ids in `to_dict` are numbered after the specials, so if the
+    specials weren't saved, the rebuilt vocabulary would have gaps at 256.."""
     rebuilt = from_dict(special_tokenizer.to_dict())
 
     assert rebuilt == special_tokenizer
@@ -344,7 +336,7 @@ def test_specials_survive_a_round_trip_through_to_dict(special_tokenizer):
 
 @pytest.mark.parametrize("text", SAMPLES)
 def test_matches_tiktoken(tiktoken_tokenizer, encoding_name, text):
-    """Our merge loop over their ranks produces their ids. The whole point."""
+    """Our merge loop over tiktoken's ranks gives tiktoken's ids."""
     assert tiktoken_tokenizer.encode(text) == tiktoken.get_encoding(
         encoding_name
     ).encode(text)
@@ -356,9 +348,8 @@ def test_tiktoken_round_trip(tiktoken_tokenizer, text):
 
 
 def test_decodes_merged_ids(tiktoken_tokenizer):
-    """Regression: `decode` used to look ids up in a table holding only the 256
-    raw bytes, so every merged token — which is to say, almost every token a real
-    corpus produces — raised KeyError."""
+    """Regression: `decode` used to look ids up in a table with only the 256
+    raw bytes, so any merged token raised KeyError."""
     ids = tiktoken_tokenizer.encode("hello world")
 
     assert all(i > 255 for i in ids), "expected merged ids, got raw bytes"
@@ -366,11 +357,9 @@ def test_decodes_merged_ids(tiktoken_tokenizer):
 
 
 def test_vocab_size_excludes_special_tokens(tiktoken_tokenizer, encoding_name):
-    """Declaring none, we carry the mergeable ranks and nothing else, so we're
-    short of tiktoken's `n_vocab` by every id it reserves above them — one for
-    GPT-2, twenty-one for cl100k, of which only five are named specials.
-    Asserted rather than left implicit because this number sizes the embedding
-    table."""
+    """With no specials declared, we only have the mergeable ranks, so we're
+    smaller than tiktoken's `n_vocab` by every id it reserves above them: one
+    for GPT-2, twenty-one for cl100k (of which only five are named specials)."""
     enc = tiktoken.get_encoding(encoding_name)
 
     assert tiktoken_tokenizer.vocab_size == len(enc._mergeable_ranks)
@@ -378,9 +367,8 @@ def test_vocab_size_excludes_special_tokens(tiktoken_tokenizer, encoding_name):
 
 
 def test_gpt2_vocab_size():
-    """Pinned separately from the general rule above: 50256-vs-50257 is the
-    number that decides whether a GPT-2 checkpoint's embedding table lines up
-    with the reference implementation's."""
+    """Checked explicitly because 50256 vs 50257 decides whether the embedding
+    table matches GPT-2's."""
     assert TiktokenBPETokenizer("gpt2").vocab_size == 50256
 
 
@@ -397,8 +385,7 @@ def test_tiktoken_survives_a_round_trip_through_to_dict(tiktoken_tokenizer):
 
 
 def test_to_dict_records_the_encoding_not_the_merges(tiktoken_tokenizer):
-    """A 2MB tokenizer.json per run would be a copy of something that can't
-    drift; the name is enough to rebuild."""
+    """The encoding name is enough to rebuild it."""
     assert "merges" not in tiktoken_tokenizer.to_dict()
 
 
@@ -407,8 +394,8 @@ def test_to_dict_records_the_encoding_not_the_merges(tiktoken_tokenizer):
 
 
 # The one special both encodings define, so the shared tests can run against
-# either without knowing which. Its id differs (50256 vs 100257), which is the
-# point: the ids come from the encoding, not from a rule of ours.
+# either. Its id differs (50256 vs 100257) because the ids come from the
+# encoding.
 EOT = "<|endoftext|>"
 
 
@@ -420,8 +407,8 @@ def special_tiktoken_tokenizer(encoding_name):
 def test_a_tiktoken_special_keeps_the_encodings_own_id(
     special_tiktoken_tokenizer, encoding_name
 ):
-    """Not numbered above the ranks the way RegexTokenizer numbers its own: these
-    ids already exist, and using different ones would break equivalence."""
+    """Unlike RegexTokenizer, the ids come from the encoding, so the output
+    still matches tiktoken."""
     enc = tiktoken.get_encoding(encoding_name)
 
     assert special_tiktoken_tokenizer.special_map == {EOT: enc._special_tokens[EOT]}
@@ -441,10 +428,9 @@ def test_a_tiktoken_special_keeps_the_encodings_own_id(
 def test_matches_tiktoken_with_specials(
     special_tiktoken_tokenizer, encoding_name, text
 ):
-    """The load-bearing test, extended to specials. `allowed_special` is needed
-    on their side because tiktoken refuses to encode a special it wasn't told to
-    expect; ours always specialises a declared token, which is the one behavioural
-    difference between the two and the reason this test states the set."""
+    """`test_matches_tiktoken` with specials. tiktoken needs `allowed_special`
+    or it refuses to encode a special, whereas ours always treats a declared
+    special as special. That's the one difference in behaviour between them."""
     assert special_tiktoken_tokenizer.encode(text) == tiktoken.get_encoding(
         encoding_name
     ).encode(text, allowed_special={EOT})
@@ -460,26 +446,24 @@ def test_tiktoken_special_round_trip(special_tiktoken_tokenizer, text):
 def test_a_tiktoken_special_decodes_back_through_the_byte_shuffle(
     special_tiktoken_tokenizer,
 ):
-    """`decode` un-permutes the whole concatenated byte string at the end, so a
-    special stored as its raw utf-8 bytes comes back out scrambled. It has to go
-    into `vocab` already in rank space, like everything else in that table."""
+    """`decode` un-shuffles all the bytes at the end, so a special has to be
+    stored in `vocab` in rank space, or it would come out scrambled."""
     eot = special_tiktoken_tokenizer.special_map[EOT]
 
     assert special_tiktoken_tokenizer.decode([eot]) == EOT
 
 
 def test_declaring_endoftext_is_what_makes_gpt2_50257():
-    """The open question this answers: a GPT-2 run is 50256 or 50257 depending on
-    whether it declared the special, not on a constant chosen once. An id the
-    model can never emit is an embedding row trained on nothing."""
+    """GPT-2's vocab size is 50256 or 50257 depending on whether the special
+    is declared."""
     assert TiktokenBPETokenizer("gpt2").vocab_size == 50256
     assert TiktokenBPETokenizer("gpt2", special_tokens=[EOT]).vocab_size == 50257
 
 
 def test_vocab_size_counts_the_gap_cl100k_leaves():
-    """cl100k's specials start at 100257, so 100256 is an id nothing occupies.
-    `vocab_size` is highest-id-plus-one rather than a count of entries, because
-    an embedding table has to have a row for the gap too."""
+    """cl100k's specials start at 100257, so 100256 is unused. `vocab_size` is
+    the highest id plus one rather than a count of entries, because the
+    embedding table still needs a row for the gap."""
     tok = TiktokenBPETokenizer("cl100k_base", special_tokens=[EOT])
 
     assert tok.special_map[EOT] == 100257
@@ -500,8 +484,8 @@ def test_declaring_every_cl100k_special_reaches_n_vocab():
 
 
 def test_an_undeclared_special_is_ordinary_text(tiktoken_tokenizer):
-    """Opting in is what reserves the id. Undeclared, `<|endoftext|>` is thirteen
-    characters that merge like any others — where tiktoken would rather raise."""
+    """Undeclared, `<|endoftext|>` is just thirteen characters that merge like
+    any others (where tiktoken would raise)."""
     ids = tiktoken_tokenizer.encode(EOT)
 
     assert len(ids) > 1
@@ -509,8 +493,8 @@ def test_an_undeclared_special_is_ordinary_text(tiktoken_tokenizer):
 
 
 def test_an_unknown_special_is_rejected(encoding_name):
-    """We can't mint an id in a vocabulary we didn't train — a name the encoding
-    doesn't define has no id to take. RegexTokenizer is where you declare your own."""
+    """A name the encoding doesn't define has no id to use. Use RegexTokenizer
+    to define your own."""
     with pytest.raises(ValueError, match="no special token"):
         TiktokenBPETokenizer(encoding_name, special_tokens=["<|pad|>"])
 
@@ -529,8 +513,8 @@ def test_tiktoken_specials_survive_a_round_trip_through_to_dict(
 def test_specials_change_the_tiktoken_recipe(
     tiktoken_tokenizer, special_tiktoken_tokenizer
 ):
-    """Same reason as for RegexTokenizer: the recipe's sha256 keys the token
-    cache, and these two encode the same text differently."""
+    """Same as for RegexTokenizer: these two encode differently, so their
+    recipes (and fingerprints) must differ."""
     assert tiktoken_tokenizer.to_dict() != special_tiktoken_tokenizer.to_dict()
 
 
@@ -539,16 +523,15 @@ def test_specials_change_the_tiktoken_recipe(
 
 
 def round_up(n: int, multiple: int) -> int:
-    """What a caller does to arrive at a `pad_vocab_to`. Deliberately here rather
-    than in the library: the tokenizer takes the number you want the embedding
-    table to be, and how you chose it is your business."""
+    """How a caller might pick a `pad_vocab_to`. Not part of the library, which
+    just takes the final size."""
     return -(-n // multiple) * multiple
 
 
 @pytest.fixture(scope="module")
 def padded_tiktoken_tokenizer(encoding_name):
-    """The same encoding, rounded up to a multiple of 64 — 50304 for gpt2,
-    100288 for cl100k."""
+    """The same encoding, rounded up to a multiple of 64 (50304 for gpt2,
+    100288 for cl100k)."""
     unpadded = TiktokenBPETokenizer(encoding_name).vocab_size
     return TiktokenBPETokenizer(
         encoding_name, pad_vocab_to=round_up(unpadded, 64)
@@ -557,9 +540,8 @@ def padded_tiktoken_tokenizer(encoding_name):
 
 @pytest.mark.parametrize("text", SAMPLES)
 def test_padding_does_not_touch_the_ids(padded_tiktoken_tokenizer, encoding_name, text):
-    """The load-bearing test again, with padding on. Padding adds rows to an
-    embedding table; if it can also move an id, it isn't padding, it's a
-    different tokenizer wearing the same name."""
+    """`test_matches_tiktoken` again, with padding on. Padding should only
+    change `vocab_size`, never the ids."""
     assert padded_tiktoken_tokenizer.encode(text) == tiktoken.get_encoding(
         encoding_name
     ).encode(text)
@@ -573,10 +555,8 @@ def test_padding_does_not_touch_the_round_trip(padded_tiktoken_tokenizer, text):
 
 
 def test_gpt2_pads_to_50304():
-    """The number this feature exists for. 50257 is 50257; 50304 is 64 x 786, and
-    the difference is measurable on the matmuls either side of the model. Pinned
-    both with and without the special, because the unpadded size differs and the
-    padded one deliberately doesn't."""
+    """The main use case: 50304 = 64 x 786. Checked with and without the
+    special, since the unpadded size differs but the padded size shouldn't."""
     assert TiktokenBPETokenizer("gpt2", pad_vocab_to=50304).vocab_size == 50304
     assert (
         TiktokenBPETokenizer(
@@ -587,8 +567,8 @@ def test_gpt2_pads_to_50304():
 
 
 def test_padding_leaves_the_unpadded_size_readable(padded_tiktoken_tokenizer):
-    """`train` counts with one and the embedding table is sized by the other, so
-    a padded tokenizer has to be able to say both."""
+    """`train` uses the unpadded size and the embedding table uses the padded
+    one, so both need to be available."""
     assert padded_tiktoken_tokenizer.unpadded_vocab_size < (
         padded_tiktoken_tokenizer.vocab_size
     )
@@ -603,9 +583,8 @@ def test_padding_to_the_size_it_already_is_changes_nothing():
 
 
 def test_padding_below_the_vocabulary_is_rejected():
-    """Not `max(unpadded, target)`: the caller stated the size of an embedding
-    table, and quietly returning a different number is how a checkpoint ends up
-    the wrong shape with nothing to point at."""
+    """Raises rather than returning `max(unpadded, target)`, since the caller
+    asked for a specific embedding table size."""
     with pytest.raises(ValueError, match="below the 50256 ids"):
         TiktokenBPETokenizer("gpt2", pad_vocab_to=50000).vocab_size
 
@@ -617,10 +596,9 @@ def test_padding_must_be_a_positive_integer(bad):
 
 
 def test_a_padding_id_decodes_to_nothing(padded_tiktoken_tokenizer):
-    """Inside `vocab_size` and outside `vocab` — the same shape of object as the
-    hole cl100k leaves at 100256. The message says "padding" rather than
-    "outside" because the id *is* inside the vocabulary, and the actual bug is a
-    sampler drawing from logits nobody masked."""
+    """A padding id is inside `vocab_size` but not in `vocab`, like the gap
+    cl100k leaves at 100256. The error says "padding" rather than "outside",
+    since the usual cause is a sampler that didn't mask the padding logits."""
     pad_id = padded_tiktoken_tokenizer.unpadded_vocab_size
 
     assert pad_id < padded_tiktoken_tokenizer.vocab_size
@@ -635,15 +613,15 @@ def test_an_id_above_the_padding_is_still_out_of_range(padded_tiktoken_tokenizer
 
 
 def test_padding_changes_the_recipe(tiktoken_tokenizer, padded_tiktoken_tokenizer):
-    """Same reason specials do: the fingerprint keys the token cache and goes
-    into a run's provenance, and these two size different embedding tables."""
+    """These two need different embedding tables, so their recipes (and
+    fingerprints) must differ."""
     assert tiktoken_tokenizer.to_dict() != padded_tiktoken_tokenizer.to_dict()
     assert fingerprint(tiktoken_tokenizer) != fingerprint(padded_tiktoken_tokenizer)
 
 
 def test_an_unpadded_recipe_records_no_padding(tiktoken_tokenizer):
-    """The key is omitted rather than written as null, so every fingerprint taken
-    before padding existed still identifies the same tokenizer."""
+    """The key is left out rather than written as null, so fingerprints from
+    before padding was added still match."""
     assert "pad_vocab_to" not in tiktoken_tokenizer.to_dict()
     assert "pad_vocab_to" not in RegexTokenizer().to_dict()
     assert ByteTokenizer().to_dict() == {"kind": "byte"}
@@ -667,9 +645,8 @@ def test_padding_survives_a_round_trip_through_to_dict(tokenizer):
 
 
 def test_the_training_target_ignores_the_padding():
-    """`train`'s ceiling asks for merges to be learned. Padding adds ids no merge
-    can reach, so counting it would silently buy fewer merges than were asked
-    for — 44 instead of 300 here."""
+    """`train`'s `vocab_size` doesn't count padding. If it did, this would only
+    learn 44 merges instead of 300."""
     tok = RegexTokenizer(split_pattern=r"\S+|\s+", pad_vocab_to=512)
     tok.train(TRAINING_TEXT, vocab_size=300)
 
@@ -679,8 +656,8 @@ def test_the_training_target_ignores_the_padding():
 
 
 def test_padding_survives_training():
-    """Padding is config, not learned state, so the reset at the top of `train`
-    must not take it with the merges."""
+    """Padding is config, not learned state, so the reset at the start of
+    `train` shouldn't remove it."""
     tok = RegexTokenizer(pad_vocab_to=512)
     tok.train(TRAINING_TEXT, vocab_size=300)
     tok.train(TRAINING_TEXT, vocab_size=280)
@@ -689,9 +666,8 @@ def test_padding_survives_training():
 
 
 def test_training_past_the_padding_is_rejected():
-    """Caught when the size is asked for rather than silently ignored: a padded
-    tokenizer trained past its target has an embedding table sized by neither
-    number, and the checkpoint is the thing that finds out."""
+    """If training goes past the padded size, asking for `vocab_size` raises
+    rather than silently returning the wrong number."""
     tok = RegexTokenizer(pad_vocab_to=280)
     tok.train(TRAINING_TEXT, vocab_size=300)
 

@@ -1,15 +1,15 @@
 """Character-level tokenizer: one id per distinct character.
 
-Two ways in, and the difference matters more than it looks:
+There are two ways to build one:
 
-`from_text` reads the alphabet off the corpus, which is what the nanoGPT lecture
-does and what `load_data` has always done. The ids it produces are a function of
-the corpus, so a corpus that gains a stray character shifts every id above it.
+`from_text` gets the alphabet from the corpus, as in the nanoGPT lecture. The ids
+then depend on the corpus, so if it gains a new character, every id after it
+shifts.
 
-`from_alphabet` states the alphabet up front. For a task with a known, closed
-character set — "0123456789+=\\n" for the adder — that's the one you want: the ids
-mean the same thing on every run, so a checkpoint stays readable even after the
-generator that produced its training data has been edited.
+`from_alphabet` takes the alphabet as an argument. For a task with a known, fixed
+set of characters (e.g. "0123456789+=\\n" for addition) this is the better
+choice: the ids are the same on every run, so old checkpoints still work after
+the training data changes.
 """
 
 from __future__ import annotations
@@ -22,15 +22,14 @@ from .base import Tokenizer, pad_record, pad_vocab_size, undecodable_id
 
 @dataclass(frozen=True)
 class CharTokenizer(Tokenizer):
-    """Frozen: a tokenizer that changes shape mid-run invalidates the embedding
-    table that was sized from it."""
+    """Frozen, since changing the vocabulary after a model's embedding table
+    has been sized from it would break the model."""
 
     stoi: dict[str, int]
     itos: dict[int, str]
-    #: Report this `vocab_size` instead, if it's larger — see `base.pad_vocab_size`.
-    #: A field rather than an inherited attribute because the frozen dataclass has
-    #: to know about it: it belongs in `__eq__`, since two tokenizers over the same
-    #: alphabet with different padding size different embedding tables.
+    #: Report this as `vocab_size` instead; see `base.pad_vocab_size`. It's a
+    #: dataclass field so that it's included in `__eq__`: two tokenizers with
+    #: the same alphabet but different padding need different embedding tables.
     pad_vocab_to: int | None = None
 
     kind: ClassVar[str] = "char"
@@ -41,10 +40,8 @@ class CharTokenizer(Tokenizer):
     def _from_chars(
         cls, chars: Iterable[str], pad_vocab_to: int | None = None
     ) -> "CharTokenizer":
-        """The one place ids get assigned. Sorted, so that the same set of
-        characters always numbers the same way regardless of the order they
-        arrived in — otherwise two runs over the same alphabet could disagree
-        about what id 7 means."""
+        """Assigns the ids. The characters are sorted so the same set always
+        gets the same ids, whatever order they came in."""
         chars = sorted(set(chars))
 
         if not chars:
@@ -58,21 +55,21 @@ class CharTokenizer(Tokenizer):
 
     @classmethod
     def from_text(cls, text: str, pad_vocab_to: int | None = None) -> "CharTokenizer":
-        """Alphabet derived from the corpus."""
+        """Alphabet taken from the corpus."""
         return cls._from_chars(text, pad_vocab_to)
 
     @classmethod
     def from_alphabet(
         cls, alphabet: str, pad_vocab_to: int | None = None
     ) -> "CharTokenizer":
-        """Alphabet stated up front. Duplicates are ignored, order is irrelevant."""
+        """Alphabet given directly. Duplicates and order don't matter."""
         return cls._from_chars(alphabet, pad_vocab_to)
 
-    # ---- the contract -----------------------------------------------------
+    # ---- the interface ----------------------------------------------------
 
     @property
     def unpadded_vocab_size(self) -> int:
-        """The characters, and nothing else. What `alphabet` iterates."""
+        """The number of characters, not counting padding."""
         return len(self.itos)
 
     @property
@@ -81,12 +78,9 @@ class CharTokenizer(Tokenizer):
 
     @property
     def alphabet(self) -> str:
-        """The vocabulary in id order — what `to_dict` writes down.
+        """The characters in id order, as written by `to_dict`.
 
-        Over `unpadded_vocab_size`, not `vocab_size`: the padded ids stand for no
-        character, so walking to `vocab_size` here would raise on a padded
-        tokenizer — and a padded alphabet round-tripping through `to_dict` would
-        be a different tokenizer anyway.
+        Stops at `unpadded_vocab_size`, since padding ids have no character.
         """
         return "".join(self.itos[i] for i in range(self.unpadded_vocab_size))
 
@@ -94,9 +88,8 @@ class CharTokenizer(Tokenizer):
         try:
             return [self.stoi[ch] for ch in text]
         except KeyError as exc:
-            # The default KeyError says only which character; this says what to
-            # do about it, because the usual cause is a fixed alphabet that
-            # forgot a character the data generator emits.
+            # A plain KeyError only names the character. Usually the cause is a
+            # fixed alphabet that's missing a character the data contains.
             raise ValueError(
                 f"character {exc.args[0]!r} is not in this tokenizer's alphabet "
                 f"({self.alphabet!r}); add it to the alphabet or fix the input"
@@ -121,10 +114,9 @@ class CharTokenizer(Tokenizer):
 
     @classmethod
     def from_dict(cls, data: dict) -> "CharTokenizer":
-        # Deliberately not `from_alphabet`: that sorts, and this must reproduce
-        # the ids exactly as written. They agree today, since `alphabet` is
-        # emitted in id order and ids were assigned in sorted order — but this
-        # one stays correct if that ever stops being true.
+        # Not `from_alphabet`, because that sorts and this should reproduce the
+        # ids exactly as saved. The two give the same result at the moment
+        # (ids are assigned in sorted order), but this doesn't rely on that.
         chars = data["alphabet"]
         return cls(
             stoi={ch: i for i, ch in enumerate(chars)},

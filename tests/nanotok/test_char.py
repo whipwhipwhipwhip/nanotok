@@ -1,8 +1,7 @@
-"""CharTokenizer: the id assignment, and the two ways of choosing an alphabet.
+"""CharTokenizer: how ids are assigned, and the two ways of choosing an alphabet.
 
-Nothing here touches the filesystem or torch. The interesting property is not
-"encode then decode gives the text back" — it's that the *same* alphabet always
-produces the *same* ids, because a checkpoint is only readable if that holds.
+Besides round trips, the main thing to check is that the same alphabet always
+gives the same ids, since otherwise old checkpoints can't be read.
 """
 
 from __future__ import annotations
@@ -25,9 +24,9 @@ def test_vocab_is_the_distinct_characters():
 
 
 def test_ids_do_not_depend_on_the_order_characters_arrive_in():
-    """The property a fixed alphabet exists to give: `from_alphabet("+0123")` and
-    `from_alphabet("3210+")` are the same tokenizer, so a config that lists the
-    adder's characters in a different order doesn't silently renumber them."""
+    """`from_alphabet("+0123")` and `from_alphabet("3210+")` are the same
+    tokenizer, so listing the characters in a different order doesn't change
+    the ids."""
     assert CharTokenizer.from_alphabet("0123456789+=\n") == CharTokenizer.from_alphabet(
         "\n=+9876543210"
     )
@@ -38,8 +37,8 @@ def test_duplicate_characters_are_ignored():
 
 
 def test_fixed_alphabet_does_not_depend_on_the_corpus():
-    """The reason `from_alphabet` exists: a corpus that happens not to contain a
-    '9' still gets a tokenizer that can represent one."""
+    """A corpus that happens not to contain a '9' still gets a tokenizer that
+    can encode one."""
     tok = CharTokenizer.from_alphabet("0123456789+=\n")
     assert tok.vocab_size == 13
     assert tok.decode(tok.encode("12+9=21\n")) == "12+9=21\n"
@@ -75,9 +74,8 @@ def test_to_dict_is_json_shaped():
 
 
 def test_padding_rounds_the_vocabulary_up_without_adding_characters():
-    """The adder's thirteen characters in an embedding table of 16 rows. The
-    three extra ids stand for nothing and are never emitted — see
-    `nanotok.base.pad_vocab_size`."""
+    """Thirteen characters padded to 16. The three extra ids have no character
+    and are never emitted; see `nanotok.base.pad_vocab_size`."""
     tok = CharTokenizer.from_alphabet("0123456789+=\n", pad_vocab_to=16)
 
     assert tok.vocab_size == 16
@@ -101,8 +99,8 @@ def test_padding_below_the_alphabet_is_rejected():
 
 
 def test_padding_makes_a_different_tokenizer():
-    """Frozen dataclass equality has to see it: same alphabet, different
-    embedding table, so a checkpoint from one won't load into the other."""
+    """Same alphabet but different embedding table sizes, so they shouldn't
+    compare equal or share a fingerprint."""
     assert CharTokenizer.from_alphabet("abc") != CharTokenizer.from_alphabet(
         "abc", pad_vocab_to=8
     )

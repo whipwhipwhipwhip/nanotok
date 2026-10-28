@@ -1,9 +1,7 @@
-"""Byte-pair primitives, shared by every BPE tokenizer in the package.
+"""Byte-pair functions shared by both BPE tokenizers.
 
-These were duplicated verbatim in `bpe/regex_tokenizer.py` and
-`bpe/gpt4_tokenizer.py`. One copy, because a fix to `merge` should not have to be
-made twice — and because the trained tokenizer and the tiktoken-seeded one
-agreeing on what a merge *is* is the whole reason their outputs are comparable.
+Keeping them in one place means the trained tokenizer and the tiktoken-based one
+use exactly the same merge logic, which is what makes their outputs comparable.
 """
 
 from __future__ import annotations
@@ -15,7 +13,7 @@ import regex
 
 
 def text_to_bytes(text: str) -> list[int]:
-    """The bottom of the ID space: every BPE vocabulary starts as the 256 bytes."""
+    """UTF-8 bytes of `text` as ints, the starting point for every BPE vocabulary."""
     tokens = text.encode("utf-8")
     tokens = list(map(int, tokens))
     return tokens
@@ -24,8 +22,8 @@ def text_to_bytes(text: str) -> list[int]:
 def find_largest(groups: list[list[int]]) -> tuple[int, tuple[int, int]]:
     """Most frequent adjacent pair across all groups, and its count.
 
-    Counted across groups but never *between* them: pairs are only formed within
-    a group, which is what stops a merge from spanning the regex split boundary.
+    Pairs are counted within each group but never across two groups, so a merge
+    can't span a regex split boundary.
     """
     d = defaultdict(int)
     top, top_pair = 0, 0
@@ -70,19 +68,15 @@ def merge(st: list[int], tp: tuple[int, int], new_token: int) -> list[int]:
 def build_vocab(
     base_vocab: dict[int, bytes], merge_map: dict[tuple[int, int], int]
 ) -> dict[int, bytes]:
-    """id -> bytes, for the starting vocabulary plus everything the merges built.
+    """id -> bytes, for the base vocabulary plus every merged token.
 
-    Takes the base rather than assuming the 256 bytes, because a tokenizer that
-    reserves ids for special tokens starts from more than the bytes and the
-    merges are numbered above whatever it started with. Copies rather than
-    extending in place: the caller's table is usually the one it's about to
-    replace, and aliasing the two makes a half-built vocabulary observable.
+    Takes the base vocabulary as an argument rather than assuming the 256 bytes,
+    because tokenizers with special tokens start from more than that. Returns a
+    new dict rather than modifying `base_vocab`.
 
-    Sorted by the new id rather than trusting the dict's insertion order: a merge
-    is defined in terms of two ids that must already exist, so building out of
-    rank order raises KeyError on a forward reference. Insertion order happens to
-    be rank order for both of today's callers, which is exactly the kind of
-    coincidence that breaks silently later.
+    Merges are added in order of their new id, not dict order, since each merge
+    refers to two ids that have to exist already. Dict order happens to be id
+    order for both current callers, but that's not guaranteed.
     """
     vocab = dict(base_vocab)
 
@@ -93,12 +87,11 @@ def build_vocab(
 
 
 def validate_specials(specials: Iterable[str]) -> list[str]:
-    """Loudly, not helpfully: both of these change the ids silently otherwise.
+    """Check the special tokens are distinct and non-empty, and raise if not.
 
-    Deduping would shift every later special down one; dropping an empty string
-    would too, and an empty special matches everywhere in any case. Same reason
-    `strict=True` is on in the config loader — a mistake in the recipe should be
-    an error, not a vocabulary that isn't the one you asked for.
+    Silently fixing either problem would change the ids: removing a duplicate
+    or an empty string shifts every later special down by one. (An empty special
+    would also match everywhere.)
     """
     specials = list(specials)
 
@@ -116,18 +109,17 @@ def validate_specials(specials: Iterable[str]) -> list[str]:
 
 
 def split_on_specials(text: str, specials: Iterable[str]) -> list[str]:
-    """Cut `text` into alternating ordinary and special pieces, specials kept.
+    """Split `text` into ordinary and special pieces, keeping the specials.
 
-    This runs *before* the regex split, not after, and that ordering is the whole
-    guarantee: a special never reaches `apply_merges`, so no sequence of ordinary
-    text can produce its id and no learned merge can be built out of one. Doing
-    it the other way round would leave `<|eot|>` as seven characters that a
-    sufficiently unlucky corpus could reassemble.
+    This runs before the regex split, so a special never reaches `apply_merges`.
+    That means ordinary text can't produce a special's id, and no merge can
+    include one. If it ran after, `<|eot|>` would just be seven characters that
+    the merges could put back together.
 
-    Longest first, because regex alternation is first-match rather than
-    longest-match: with `<|end|>` listed before `<|end|>of<|end|>`, the short one
-    would eat the long one's prefix. That ordering is independent of the
-    declaration order the ids come from.
+    Specials are matched longest first, because regex alternation takes the
+    first match rather than the longest. Otherwise, with `<|end|>` listed before
+    `<|end|>of<|end|>`, the short one would match the start of the long one.
+    This ordering doesn't affect the ids, which still follow declaration order.
     """
     specials = list(specials)
     if not specials:
@@ -136,20 +128,18 @@ def split_on_specials(text: str, specials: Iterable[str]) -> list[str]:
     pattern = regex.compile(
         "(" + "|".join(regex.escape(s) for s in sorted(specials, key=len, reverse=True)) + ")"
     )
-    # `split` on a capturing pattern interleaves the separators into the result,
-    # which is why the group is there. The empty strings it puts either side of a
-    # match are dropped: they aren't chunks, they're punctuation of the split.
+    # `split` with a capturing group keeps the matched specials in the result.
+    # It also adds empty strings around matches, which we drop.
     return [part for part in pattern.split(text) if part]
 
 
 def apply_merges(tokens: list[int], merge_map: dict[tuple[int, int], int]) -> list[int]:
-    """Encode one chunk: repeatedly merge the lowest-ranked pair present.
+    """Encode one chunk by repeatedly merging the lowest-ranked pair present.
 
-    Lowest rank, not leftmost or most frequent — rank *is* the order the merges
-    were learned in, so replaying them in that order is what reproduces the
-    training-time vocabulary. Getting this wrong doesn't crash, it just produces
-    plausible-looking ids that disagree with the reference implementation, which
-    is why `tests/nanotok` checks against tiktoken rather than eyeballing.
+    Lowest rank, not leftmost or most frequent: the rank is the order the merges
+    were learned in, so applying them in that order reproduces the training-time
+    tokenization. Getting this wrong doesn't crash, it just gives plausible but
+    wrong ids, which is why the tests compare against tiktoken.
     """
     while True:
         best_rank = float("inf")
